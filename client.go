@@ -9,16 +9,16 @@ import (
 )
 
 func main() {
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Second)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://localhost:8080/cotacao", nil)
 	if err != nil {
-		panic(err)
+		return
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		panic(err)
+		return
 	}
 	defer resp.Body.Close()
 	io.Copy(os.Stdout, resp.Body)

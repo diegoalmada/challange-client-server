@@ -7,6 +7,7 @@ import (
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -46,6 +47,7 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		status := http.StatusInternalServerError
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			log.Println("Exchange rate request has been canceled.")
 			status = http.StatusRequestTimeout
 		}
 		http.Error(w, http.StatusText(status), status)
@@ -60,7 +62,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 	err = saveQuotation(ctx, quotation)
 	if err != nil {
-		http.Error(w, http.StatusText(http.StatusRequestTimeout), http.StatusRequestTimeout)
+		status := http.StatusInternalServerError
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			log.Println("DB Store has been canceled.")
+			status = http.StatusRequestTimeout
+		}
+		http.Error(w, http.StatusText(status), http.StatusRequestTimeout)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -69,44 +76,48 @@ func handler(w http.ResponseWriter, r *http.Request) {
 }
 
 func findExchangeRate(ctx context.Context) (*CurrencyData, error) {
-	select {
-	case <-time.After(200 * time.Millisecond):
-		req, err := http.Get(ExchangeRateUrl)
-		if err != nil {
-			return nil, err
-		}
-		defer req.Body.Close()
-		body, err := io.ReadAll(req.Body)
-		if err != nil {
-			return nil, err
-		}
-		var rate ExchangeRate
-		err = json.Unmarshal(body, &rate)
-		if err != nil {
-			return nil, err
-		}
-		return &rate.Data, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
+	reqCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, ExchangeRateUrl, nil)
+	if err != nil {
+		return nil, err
 	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var rate ExchangeRate
+	err = json.Unmarshal(body, &rate)
+	if err != nil {
+		return nil, err
+	}
+	return &rate.Data, nil
 }
 
 func saveQuotation(ctx context.Context, quotation *Quotation) error {
-	select {
-	case <-time.After(10 * time.Millisecond):
-		db, err := gorm.Open(sqlite.Open("app.db"), &gorm.Config{})
-		if err != nil {
-			return err
-		}
-		db.AutoMigrate(&Quotation{})
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
 
-		db.Create(quotation)
-
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
+	db, err := gorm.Open(sqlite.Open("app.db"), &gorm.Config{})
+	if err != nil {
+		return err
 	}
+	db.WithContext(ctx).AutoMigrate(&Quotation{})
 
+	result := db.WithContext(ctx).Create(quotation)
+	if result.Error != nil {
+		return result.Error
+	}
+	return nil
 }
 
 func newQuotation(currency *CurrencyData) (*Quotation, error) {
